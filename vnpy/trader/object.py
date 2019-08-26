@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from logging import INFO
 
-from .constant import Direction, Exchange, Interval, Offset, Status, Product, OptionType, PriceType
+from .constant import Direction, Exchange, Interval, Offset, Status, Product, OptionType, OrderType
 
 ACTIVE_STATUSES = set([Status.SUBMITTING, Status.NOTTRADED, Status.PARTTRADED])
 
@@ -14,8 +14,8 @@ ACTIVE_STATUSES = set([Status.SUBMITTING, Status.NOTTRADED, Status.PARTTRADED])
 @dataclass
 class BaseData:
     """
-    Any data object needs a gateway_name as source or 
-    destination and should inherit base data.
+    Any data object needs a gateway_name as source 
+    and should inherit base data.
     """
 
     gateway_name: str
@@ -36,6 +36,7 @@ class TickData(BaseData):
 
     name: str = ""
     volume: float = 0
+    open_interest: float = 0
     last_price: float = 0
     last_volume: float = 0
     limit_up: float = 0
@@ -87,6 +88,7 @@ class BarData(BaseData):
 
     interval: Interval = None
     volume: float = 0
+    open_interest: float = 0
     open_price: float = 0
     high_price: float = 0
     low_price: float = 0
@@ -108,6 +110,7 @@ class OrderData(BaseData):
     exchange: Exchange
     orderid: str
 
+    type: OrderType = OrderType.LIMIT
     direction: Direction = ""
     offset: Offset = Offset.NONE
     price: float = 0
@@ -184,7 +187,7 @@ class PositionData(BaseData):
     def __post_init__(self):
         """"""
         self.vt_symbol = f"{self.symbol}.{self.exchange.value}"
-        self.vt_positionid = f"{self.vt_symbol}.{self.direction}"
+        self.vt_positionid = f"{self.vt_symbol}.{self.direction.value}"
 
 
 @dataclass
@@ -232,8 +235,13 @@ class ContractData(BaseData):
     size: int
     pricetick: float
 
+    min_volume: float = 1           # minimum trading volume of the contract
+    stop_supported: bool = False    # whether server supports stop order
+    net_position: bool = False      # whether gateway uses net position volume
+    history_data: bool = False      # whether gateway provides bar history data
+
     option_strike: float = 0
-    option_underlying: str = ""  # vt_symbol of underlying contract
+    option_underlying: str = ""     # vt_symbol of underlying contract
     option_type: OptionType = None
     option_expiry: datetime = None
 
@@ -265,7 +273,7 @@ class OrderRequest:
     symbol: str
     exchange: Exchange
     direction: Direction
-    price_type: PriceType
+    type: OrderType
     volume: float
     price: float = 0
     offset: Offset = Offset.NONE
@@ -282,6 +290,7 @@ class OrderRequest:
             symbol=self.symbol,
             exchange=self.exchange,
             orderid=orderid,
+            type=self.type,
             direction=self.direction,
             offset=self.offset,
             price=self.price,
@@ -300,6 +309,23 @@ class CancelRequest:
     orderid: str
     symbol: str
     exchange: Exchange
+
+    def __post_init__(self):
+        """"""
+        self.vt_symbol = f"{self.symbol}.{self.exchange.value}"
+
+
+@dataclass
+class HistoryRequest:
+    """
+    Request sending to specific gateway for querying history data.
+    """
+
+    symbol: str
+    exchange: Exchange
+    start: datetime
+    end: datetime = None
+    interval: Interval = None
 
     def __post_init__(self):
         """"""

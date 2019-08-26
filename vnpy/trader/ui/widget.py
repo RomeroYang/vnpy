@@ -5,11 +5,12 @@ Basic widgets for VN Trader.
 import csv
 from enum import Enum
 from typing import Any
+from copy import copy
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from vnpy.event import Event, EventEngine
-from ..constant import Direction, Exchange, Offset, PriceType
+from ..constant import Direction, Exchange, Offset, OrderType
 from ..engine import MainEngine
 from ..event import (
     EVENT_TICK,
@@ -21,6 +22,8 @@ from ..event import (
 )
 from ..object import OrderRequest, SubscribeRequest
 from ..utility import load_json, save_json
+from ..setting import SETTING_FILENAME, SETTINGS
+
 
 COLOR_LONG = QtGui.QColor("red")
 COLOR_SHORT = QtGui.QColor("green")
@@ -234,8 +237,9 @@ class BaseMonitor(QtWidgets.QTableWidget):
         """
         Register event handler into event engine.
         """
-        self.signal.connect(self.process_event)
-        self.event_engine.register(self.event_type, self.signal.emit)
+        if self.event_type:
+            self.signal.connect(self.process_event)
+            self.event_engine.register(self.event_type, self.signal.emit)
 
     def process_event(self, event):
         """
@@ -411,6 +415,7 @@ class OrderMonitor(BaseMonitor):
         "orderid": {"display": "委托号", "cell": BaseCell, "update": False},
         "symbol": {"display": "代码", "cell": BaseCell, "update": False},
         "exchange": {"display": "交易所", "cell": EnumCell, "update": False},
+        "type": {"display": "类型", "cell": EnumCell, "update": False},
         "direction": {"display": "方向", "cell": DirectionCell, "update": False},
         "offset": {"display": "开平", "cell": EnumCell, "update": False},
         "price": {"display": "价格", "cell": BaseCell, "update": False},
@@ -549,11 +554,11 @@ class ConnectDialog(QtWidgets.QDialog):
             else:
                 field_value = field_type(widget.text())
             setting[field_name] = field_value
-        
+
         save_json(self.filename, setting)
-        
+
         self.main_engine.connect(setting, self.gateway_name)
-        
+
         self.accept()
 
 
@@ -581,8 +586,9 @@ class TradingWidget(QtWidgets.QWidget):
         self.setFixedWidth(300)
 
         # Trading function area
+        exchanges = self.main_engine.get_all_exchanges()
         self.exchange_combo = QtWidgets.QComboBox()
-        self.exchange_combo.addItems([exchange.value for exchange in Exchange])
+        self.exchange_combo.addItems([exchange.value for exchange in exchanges])
 
         self.symbol_line = QtWidgets.QLineEdit()
         self.symbol_line.returnPressed.connect(self.set_vt_symbol)
@@ -597,9 +603,9 @@ class TradingWidget(QtWidgets.QWidget):
         self.offset_combo = QtWidgets.QComboBox()
         self.offset_combo.addItems([offset.value for offset in Offset])
 
-        self.price_type_combo = QtWidgets.QComboBox()
-        self.price_type_combo.addItems(
-            [price_type.value for price_type in PriceType])
+        self.order_type_combo = QtWidgets.QComboBox()
+        self.order_type_combo.addItems(
+            [order_type.value for order_type in OrderType])
 
         double_validator = QtGui.QDoubleValidator()
         double_validator.setBottom(0)
@@ -625,7 +631,7 @@ class TradingWidget(QtWidgets.QWidget):
         form1.addRow("名称", self.name_line)
         form1.addRow("方向", self.direction_combo)
         form1.addRow("开平", self.offset_combo)
-        form1.addRow("类型", self.price_type_combo)
+        form1.addRow("类型", self.order_type_combo)
         form1.addRow("价格", self.price_line)
         form1.addRow("数量", self.volume_line)
         form1.addRow("接口", self.gateway_combo)
@@ -819,12 +825,12 @@ class TradingWidget(QtWidgets.QWidget):
         """
         symbol = str(self.symbol_line.text())
         if not symbol:
-            QtWidgets.QMessageBox.critical("委托失败", "请输入合约代码")
+            QtWidgets.QMessageBox.critical(self, "委托失败", "请输入合约代码")
             return
 
         volume_text = str(self.volume_line.text())
         if not volume_text:
-            QtWidgets.QMessageBox.critical("委托失败", "请输入委托数量")
+            QtWidgets.QMessageBox.critical(self, "委托失败", "请输入委托数量")
             return
         volume = float(volume_text)
 
@@ -838,7 +844,7 @@ class TradingWidget(QtWidgets.QWidget):
             symbol=symbol,
             exchange=Exchange(str(self.exchange_combo.currentText())),
             direction=Direction(str(self.direction_combo.currentText())),
-            price_type=PriceType(str(self.price_type_combo.currentText())),
+            type=OrderType(str(self.order_type_combo.currentText())),
             volume=volume,
             price=price,
             offset=Offset(str(self.offset_combo.currentText())),
@@ -892,6 +898,7 @@ class ContractManager(QtWidgets.QWidget):
         "product": "合约分类",
         "size": "合约乘数",
         "pricetick": "价格跳动",
+        "min_volume": "最小委托量",
         "gateway_name": "交易接口",
     }
 
@@ -999,3 +1006,70 @@ class AboutDialog(QtWidgets.QDialog):
         vbox = QtWidgets.QVBoxLayout()
         vbox.addWidget(label)
         self.setLayout(vbox)
+
+
+class GlobalDialog(QtWidgets.QDialog):
+    """
+    Start connection of a certain gateway.
+    """
+
+    def __init__(self):
+        """"""
+        super().__init__()
+
+        self.widgets = {}
+
+        self.init_ui()
+
+    def init_ui(self):
+        """"""
+        self.setWindowTitle("全局配置")
+        self.setMinimumWidth(800)
+
+        settings = copy(SETTINGS)
+        settings.update(load_json(SETTING_FILENAME))
+
+        # Initialize line edits and form layout based on setting.
+        form = QtWidgets.QFormLayout()
+
+        for field_name, field_value in settings.items():
+            field_type = type(field_value)
+            widget = QtWidgets.QLineEdit(str(field_value))
+
+            form.addRow(f"{field_name} <{field_type.__name__}>", widget)
+            self.widgets[field_name] = (widget, field_type)
+
+        button = QtWidgets.QPushButton("确定")
+        button.clicked.connect(self.update_setting)
+        form.addRow(button)
+
+        self.setLayout(form)
+
+    def update_setting(self):
+        """
+        Get setting value from line edits and update global setting file.
+        """
+        settings = {}
+        for field_name, tp in self.widgets.items():
+            widget, field_type = tp
+            value_text = widget.text()
+
+            if field_type == bool:
+                if value_text == "True":
+                    field_value = True
+                else:
+                    field_value = False
+            else:
+                field_value = field_type(value_text)
+
+            settings[field_name] = field_value
+
+        QtWidgets.QMessageBox.information(
+            self,
+            "注意",
+            "全局配置的修改需要重启VN Trader后才会生效！",
+            QtWidgets.QMessageBox.Ok
+        )
+
+        save_json(SETTING_FILENAME, settings)
+        self.accept()

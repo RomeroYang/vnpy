@@ -1,4 +1,3 @@
-# encoding: UTF-8
 """
 Please install futu-api before use.
 """
@@ -79,12 +78,14 @@ class FutuGateway(BaseGateway):
     """"""
 
     default_setting = {
-        "password": "",
-        "host": "127.0.0.1",
-        "port": 11111,
-        "market": ["HK", "US"],
-        "env": [TrdEnv.REAL, TrdEnv.SIMULATE],
+        "密码": "",
+        "地址": "127.0.0.1",
+        "端口": 11111,
+        "市场": ["HK", "US"],
+        "环境": [TrdEnv.REAL, TrdEnv.SIMULATE],
     }
+
+    exchanges = list(EXCHANGE_FUTU2VT.values())
 
     def __init__(self, event_engine):
         """Constructor"""
@@ -112,11 +113,11 @@ class FutuGateway(BaseGateway):
 
     def connect(self, setting: dict):
         """"""
-        self.host = setting["host"]
-        self.port = setting["port"]
-        self.market = setting["market"]
-        self.password = setting["password"]
-        self.env = setting["env"]
+        self.host = setting["地址"]
+        self.port = setting["端口"]
+        self.market = setting["市场"]
+        self.password = setting["密码"]
+        self.env = setting["环境"]
 
         self.connect_quote()
         self.connect_trade()
@@ -244,7 +245,7 @@ class FutuGateway(BaseGateway):
     def send_order(self, req: OrderRequest):
         """"""
         side = DIRECTION_VT2FUTU[req.direction]
-        price_type = OrderType.NORMAL  # Only limit order is supported.
+        futu_order_type = OrderType.NORMAL  # Only limit order is supported.
 
         # Set price adjustment mode to inside adjustment.
         if req.direction is Direction.LONG:
@@ -258,7 +259,7 @@ class FutuGateway(BaseGateway):
             req.volume,
             futu_symbol,
             side,
-            price_type,
+            futu_order_type,
             trd_env=self.env,
             adjust_limit=adjust_limit,
         )
@@ -303,6 +304,7 @@ class FutuGateway(BaseGateway):
                     product=product,
                     size=1,
                     pricetick=0.001,
+                    net_position=True,
                     gateway_name=self.gateway_name,
                 )
                 self.on_contract(contract)
@@ -343,7 +345,7 @@ class FutuGateway(BaseGateway):
                 symbol=symbol,
                 exchange=exchange,
                 direction=Direction.LONG,
-                volume=float(row["qty"]),
+                volume=row["qty"],
                 frozen=(float(row["qty"]) - float(row["can_sell_qty"])),
                 price=float(row["pl_val"]),
                 pnl=float(row["cost_price"]),
@@ -463,8 +465,8 @@ class FutuGateway(BaseGateway):
                 orderid=str(row["order_id"]),
                 direction=DIRECTION_FUTU2VT[row["trd_side"]],
                 price=float(row["price"]),
-                volume=float(row["qty"]),
-                traded=float(row["dealt_qty"]),
+                volume=row["qty"],
+                traded=row["dealt_qty"],
                 status=STATUS_FUTU2VT[row["order_status"]],
                 time=row["create_time"].split(" ")[-1],
                 gateway_name=self.gateway_name,
@@ -490,7 +492,7 @@ class FutuGateway(BaseGateway):
                 tradeid=tradeid,
                 orderid=row["order_id"],
                 price=float(row["price"]),
-                volume=float(row["qty"]),
+                volume=row["qty"],
                 time=row["create_time"].split(" ")[-1],
                 gateway_name=self.gateway_name,
             )
