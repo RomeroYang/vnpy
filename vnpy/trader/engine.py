@@ -1,15 +1,14 @@
-"""
-"""
-
-import logging
 import smtplib
 import os
-from abc import ABC
+import time
+import traceback
+from abc import ABC, abstractmethod
 from datetime import datetime
 from email.message import EmailMessage
 from queue import Empty, Queue
-from threading import Thread
-from typing import Any, Sequence, Type
+from threading import Thread, current_thread
+from typing import Any, TypeVar, cast
+from collections.abc import Callable
 
 from vnpy.event import Event, EventEngine
 from .app import BaseApp
@@ -20,55 +19,104 @@ from .event import (
     EVENT_POSITION,
     EVENT_ACCOUNT,
     EVENT_CONTRACT,
-    EVENT_LOG
+    EVENT_LOG,
+    EVENT_QUOTE
 )
 from .gateway import BaseGateway
 from .object import (
     CancelRequest,
     LogData,
     OrderRequest,
+    QuoteData,
+    QuoteRequest,
     SubscribeRequest,
-    HistoryRequest
+    HistoryRequest,
+    OrderData,
+    BarData,
+    TickData,
+    TradeData,
+    PositionData,
+    AccountData,
+    ContractData,
+    Exchange
 )
 from .setting import SETTINGS
-from .utility import get_folder_path, TRADER_DIR
+from .utility import TRADER_DIR, load_json, save_json
+from .converter import OffsetConverter
+from .logger import logger, DEBUG, INFO, WARNING, ERROR, CRITICAL
+from .locale import _
+from .wechat import (
+    Credentials,
+    SessionExpired,
+    WeixinError,
+    send_text,
+)
+
+
+EngineType = TypeVar("EngineType", bound="BaseEngine")
+
+
+class BaseEngine(ABC):
+    """
+    Abstract class for implementing a function engine.
+    """
+
+    @abstractmethod
+    def __init__(
+        self,
+        main_engine: "MainEngine",
+        event_engine: EventEngine,
+        engine_name: str,
+    ) -> None:
+        """"""
+        self.main_engine: MainEngine = main_engine
+        self.event_engine: EventEngine = event_engine
+        self.engine_name: str = engine_name
+
+    def close(self) -> None:
+        """"""
+        return
 
 
 class MainEngine:
     """
-    Acts as the core of VN Trader.
+    Acts as the core of the trading platform.
     """
 
-    def __init__(self, event_engine: EventEngine = None):
+    def __init__(self, event_engine: EventEngine | None = None) -> None:
         """"""
         if event_engine:
-            self.event_engine = event_engine
+            self.event_engine: EventEngine = event_engine
         else:
             self.event_engine = EventEngine()
         self.event_engine.start()
 
-        self.gateways = {}
-        self.engines = {}
-        self.apps = {}
-        self.exchanges = []
+        self.gateways: dict[str, BaseGateway] = {}
+        self.engines: dict[str, BaseEngine] = {}
+        self.apps: dict[str, BaseApp] = {}
+        self.exchanges: list[Exchange] = []
 
         os.chdir(TRADER_DIR)    # Change working directory
         self.init_engines()     # Initialize function engines
 
-    def add_engine(self, engine_class: Any):
+    def add_engine(self, engine_class: type[EngineType]) -> EngineType:
         """
         Add function engine.
         """
-        engine = engine_class(self, self.event_engine)
+        engine: EngineType = engine_class(self, self.event_engine)      # type: ignore
         self.engines[engine.engine_name] = engine
         return engine
 
-    def add_gateway(self, gateway_class: Type[BaseGateway]):
+    def add_gateway(self, gateway_class: type[BaseGateway], gateway_name: str = "") -> BaseGateway:
         """
         Add gateway.
         """
-        gateway = gateway_class(self.event_engine)
-        self.gateways[gateway.gateway_name] = gateway
+        # Use default name if gateway_name not passed
+        if not gateway_name:
+            gateway_name = gateway_class.default_name
+
+        gateway: BaseGateway = gateway_class(self.event_engine, gateway_name)
+        self.gateways[gateway_name] = gateway
 
         # Add gateway supported exchanges into engine
         for exchange in gateway.exchanges:
@@ -77,138 +125,189 @@ class MainEngine:
 
         return gateway
 
-    def add_app(self, app_class: Type[BaseApp]):
+    def add_app(self, app_class: type[BaseApp]) -> BaseEngine:
         """
         Add app.
         """
-        app = app_class()
+        app: BaseApp = app_class()
         self.apps[app.app_name] = app
 
-        engine = self.add_engine(app.engine_class)
+        engine: BaseEngine = self.add_engine(app.engine_class)
         return engine
 
-    def init_engines(self):
+    def init_engines(self) -> None:
         """
         Init all engines.
         """
         self.add_engine(LogEngine)
-        self.add_engine(OmsEngine)
-        self.add_engine(EmailEngine)
 
-    def write_log(self, msg: str, source: str = ""):
+        oms_engine: OmsEngine = self.add_engine(OmsEngine)
+        self.get_tick: Callable[[str], TickData | None] = oms_engine.get_tick
+        self.get_order: Callable[[str], OrderData | None] = oms_engine.get_order
+        self.get_trade: Callable[[str], TradeData | None] = oms_engine.get_trade
+        self.get_position: Callable[[str], PositionData | None] = oms_engine.get_position
+        self.get_account: Callable[[str], AccountData | None] = oms_engine.get_account
+        self.get_contract: Callable[[str], ContractData | None] = oms_engine.get_contract
+        self.get_quote: Callable[[str], QuoteData | None] = oms_engine.get_quote
+        self.get_all_ticks: Callable[[], list[TickData]] = oms_engine.get_all_ticks
+        self.get_all_orders: Callable[[], list[OrderData]] = oms_engine.get_all_orders
+        self.get_all_trades: Callable[[], list[TradeData]] = oms_engine.get_all_trades
+        self.get_all_positions: Callable[[], list[PositionData]] = oms_engine.get_all_positions
+        self.get_all_accounts: Callable[[], list[AccountData]] = oms_engine.get_all_accounts
+        self.get_all_contracts: Callable[[], list[ContractData]] = oms_engine.get_all_contracts
+        self.get_all_quotes: Callable[[], list[QuoteData]] = oms_engine.get_all_quotes
+        self.get_all_active_orders: Callable[[], list[OrderData]] = oms_engine.get_all_active_orders
+        self.get_all_active_quotes: Callable[[], list[QuoteData]] = oms_engine.get_all_active_quotes
+        self.update_order_request: Callable[[OrderRequest, str, str], None] = oms_engine.update_order_request
+        self.convert_order_request: Callable[[OrderRequest, str, bool, bool], list[OrderRequest]] = oms_engine.convert_order_request
+        self.get_converter: Callable[[str], OffsetConverter | None] = oms_engine.get_converter
+
+        self.add_engine(EmailEngine)
+        self.add_engine(WechatEngine)
+
+    def write_log(self, msg: str, source: str = "MainEngine") -> None:
         """
         Put log event with specific message.
         """
-        log = LogData(msg=msg, gateway_name=source)
-        event = Event(EVENT_LOG, log)
+        log: LogData = LogData(msg=msg, gateway_name=source)
+        event: Event = Event(EVENT_LOG, log)
         self.event_engine.put(event)
 
-    def get_gateway(self, gateway_name: str):
+    def send_notification(self, content: str, subject: str | None = None) -> None:
+        """
+        Push notification through all configured channels.
+        """
+        if subject is None:
+            subject = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        email_engine: EmailEngine = cast(EmailEngine, self.get_engine("email"))
+        email_engine.send_email(subject, content)
+
+        wechat_engine: WechatEngine = cast(WechatEngine, self.get_engine("wechat"))
+        wechat_engine.send_wechat(f"{subject}\n{content}")
+
+    def get_gateway(self, gateway_name: str) -> BaseGateway | None:
         """
         Return gateway object by name.
         """
-        gateway = self.gateways.get(gateway_name, None)
+        gateway: BaseGateway | None = self.gateways.get(gateway_name, None)
         if not gateway:
-            self.write_log(f"找不到底层接口：{gateway_name}")
+            self.write_log(_("找不到底层接口：{}").format(gateway_name))
         return gateway
 
-    def get_engine(self, engine_name: str):
+    def get_engine(self, engine_name: str) -> BaseEngine | None:
         """
         Return engine object by name.
         """
-        engine = self.engines.get(engine_name, None)
+        engine: BaseEngine | None = self.engines.get(engine_name, None)
         if not engine:
-            self.write_log(f"找不到引擎：{engine_name}")
+            self.write_log(_("找不到引擎：{}").format(engine_name))
         return engine
 
-    def get_default_setting(self, gateway_name: str):
+    def get_default_setting(self, gateway_name: str) -> dict[str, str | bool | int | float] | None:
         """
         Get default setting dict of a specific gateway.
         """
-        gateway = self.get_gateway(gateway_name)
+        gateway: BaseGateway | None = self.get_gateway(gateway_name)
         if gateway:
             return gateway.get_default_setting()
         return None
 
-    def get_all_gateway_names(self):
+    def get_all_gateway_names(self) -> list[str]:
         """
-        Get all names of gatewasy added in main engine.
+        Get all names of gateway added in main engine.
         """
         return list(self.gateways.keys())
 
-    def get_all_apps(self):
+    def get_all_apps(self) -> list[BaseApp]:
         """
         Get all app objects.
         """
         return list(self.apps.values())
 
-    def get_all_exchanges(self):
+    def get_all_exchanges(self) -> list[Exchange]:
         """
         Get all exchanges.
         """
         return self.exchanges
 
-    def connect(self, setting: dict, gateway_name: str):
+    def connect(self, setting: dict, gateway_name: str) -> None:
         """
         Start connection of a specific gateway.
         """
-        gateway = self.get_gateway(gateway_name)
+        gateway: BaseGateway | None = self.get_gateway(gateway_name)
         if gateway:
+            self.write_log(_("连接登录 -> {}").format(gateway_name))
+
             gateway.connect(setting)
 
-    def subscribe(self, req: SubscribeRequest, gateway_name: str):
+    def subscribe(self, req: SubscribeRequest, gateway_name: str) -> None:
         """
         Subscribe tick data update of a specific gateway.
         """
-        gateway = self.get_gateway(gateway_name)
+        gateway: BaseGateway | None = self.get_gateway(gateway_name)
         if gateway:
+            self.write_log(_("订阅行情 -> {}：{}").format(gateway_name, req))
+
             gateway.subscribe(req)
 
-    def send_order(self, req: OrderRequest, gateway_name: str):
+    def send_order(self, req: OrderRequest, gateway_name: str) -> str:
         """
         Send new order request to a specific gateway.
         """
-        gateway = self.get_gateway(gateway_name)
+        gateway: BaseGateway | None = self.get_gateway(gateway_name)
         if gateway:
+            self.write_log(_("委托下单 -> {}：{}").format(gateway_name, req))
+
             return gateway.send_order(req)
         else:
             return ""
 
-    def cancel_order(self, req: CancelRequest, gateway_name: str):
+    def cancel_order(self, req: CancelRequest, gateway_name: str) -> None:
         """
         Send cancel order request to a specific gateway.
         """
-        gateway = self.get_gateway(gateway_name)
+        gateway: BaseGateway | None = self.get_gateway(gateway_name)
         if gateway:
+            self.write_log(_("委托撤单 -> {}：{}").format(gateway_name, req))
+
             gateway.cancel_order(req)
 
-    def send_orders(self, reqs: Sequence[OrderRequest], gateway_name: str):
+    def send_quote(self, req: QuoteRequest, gateway_name: str) -> str:
         """
+        Send new quote request to a specific gateway.
         """
-        gateway = self.get_gateway(gateway_name)
+        gateway: BaseGateway | None = self.get_gateway(gateway_name)
         if gateway:
-            return gateway.send_orders(reqs)
+            self.write_log(_("报价下单 -> {}：{}").format(gateway_name, req))
+
+            return gateway.send_quote(req)
         else:
-            return ["" for req in reqs]
+            return ""
 
-    def cancel_orders(self, reqs: Sequence[CancelRequest], gateway_name: str):
+    def cancel_quote(self, req: CancelRequest, gateway_name: str) -> None:
         """
+        Send cancel quote request to a specific gateway.
         """
-        gateway = self.get_gateway(gateway_name)
+        gateway: BaseGateway | None = self.get_gateway(gateway_name)
         if gateway:
-            gateway.cancel_orders(reqs)
+            self.write_log(_("报价撤单 -> {}：{}").format(gateway_name, req))
 
-    def query_history(self, req: HistoryRequest, gateway_name: str):
+            gateway.cancel_quote(req)
+
+    def query_history(self, req: HistoryRequest, gateway_name: str) -> list[BarData]:
         """
-        Send cancel order request to a specific gateway.
+        Query bar history data from a specific gateway.
         """
-        gateway = self.get_gateway(gateway_name)
+        gateway: BaseGateway | None = self.get_gateway(gateway_name)
         if gateway:
+            self.write_log(_("查询K线 -> {}：{}").format(gateway_name, req))
+
             return gateway.query_history(req)
         else:
-            return None
+            return []
 
-    def close(self):
+    def close(self) -> None:
         """
         Make sure every gateway and app is closed properly before
         programme exit.
@@ -223,140 +322,66 @@ class MainEngine:
             gateway.close()
 
 
-class BaseEngine(ABC):
-    """
-    Abstract class for implementing an function engine.
-    """
-
-    def __init__(
-        self,
-        main_engine: MainEngine,
-        event_engine: EventEngine,
-        engine_name: str,
-    ):
-        """"""
-        self.main_engine = main_engine
-        self.event_engine = event_engine
-        self.engine_name = engine_name
-
-    def close(self):
-        """"""
-        pass
-
-
 class LogEngine(BaseEngine):
     """
-    Processes log event and output with logging module.
+    Provides log event output function.
     """
 
-    def __init__(self, main_engine: MainEngine, event_engine: EventEngine):
-        """"""
-        super(LogEngine, self).__init__(main_engine, event_engine, "log")
+    level_map: dict[int, str] = {
+        DEBUG: "DEBUG",
+        INFO: "INFO",
+        WARNING: "WARNING",
+        ERROR: "ERROR",
+        CRITICAL: "CRITICAL",
+    }
 
-        if not SETTINGS["log.active"]:
+    def __init__(self, main_engine: MainEngine, event_engine: EventEngine) -> None:
+        """"""
+        super().__init__(main_engine, event_engine, "log")
+
+        self.active = SETTINGS["log.active"]
+
+        self.register_log(EVENT_LOG)
+
+    def process_log_event(self, event: Event) -> None:
+        """Process log event"""
+        if not self.active:
             return
 
-        self.level = SETTINGS["log.level"]
+        log: LogData = event.data
+        level: str | int = self.level_map.get(log.level, log.level)
+        logger.bind(gateway_name=log.gateway_name).log(level, log.msg)
 
-        self.logger = logging.getLogger("VN Trader")
-        self.logger.setLevel(self.level)
-
-        self.formatter = logging.Formatter(
-            "%(asctime)s  %(levelname)s: %(message)s"
-        )
-
-        self.add_null_handler()
-
-        if SETTINGS["log.console"]:
-            self.add_console_handler()
-
-        if SETTINGS["log.file"]:
-            self.add_file_handler()
-
-        self.register_event()
-
-    def add_null_handler(self):
-        """
-        Add null handler for logger.
-        """
-        null_handler = logging.NullHandler()
-        self.logger.addHandler(null_handler)
-
-    def add_console_handler(self):
-        """
-        Add console output of log.
-        """
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(self.level)
-        console_handler.setFormatter(self.formatter)
-        self.logger.addHandler(console_handler)
-
-    def add_file_handler(self):
-        """
-        Add file output of log. 
-        """
-        today_date = datetime.now().strftime("%Y%m%d")
-        filename = f"vt_{today_date}.log"
-        log_path = get_folder_path("log")
-        file_path = log_path.joinpath(filename)
-
-        file_handler = logging.FileHandler(
-            file_path, mode="a", encoding="utf8"
-        )
-        file_handler.setLevel(self.level)
-        file_handler.setFormatter(self.formatter)
-        self.logger.addHandler(file_handler)
-
-    def register_event(self):
-        """"""
-        self.event_engine.register(EVENT_LOG, self.process_log_event)
-
-    def process_log_event(self, event: Event):
-        """
-        Process log event.
-        """
-        log = event.data
-        self.logger.log(log.level, log.msg)
+    def register_log(self, event_type: str) -> None:
+        """Register log event handler"""
+        self.event_engine.register(event_type, self.process_log_event)
 
 
 class OmsEngine(BaseEngine):
     """
-    Provides order management system function for VN Trader.
+    Provides order management system function.
     """
 
-    def __init__(self, main_engine: MainEngine, event_engine: EventEngine):
+    def __init__(self, main_engine: MainEngine, event_engine: EventEngine) -> None:
         """"""
-        super(OmsEngine, self).__init__(main_engine, event_engine, "oms")
+        super().__init__(main_engine, event_engine, "oms")
 
-        self.ticks = {}
-        self.orders = {}
-        self.trades = {}
-        self.positions = {}
-        self.accounts = {}
-        self.contracts = {}
+        self.ticks: dict[str, TickData] = {}
+        self.orders: dict[str, OrderData] = {}
+        self.trades: dict[str, TradeData] = {}
+        self.positions: dict[str, PositionData] = {}
+        self.accounts: dict[str, AccountData] = {}
+        self.contracts: dict[str, ContractData] = {}
+        self.quotes: dict[str, QuoteData] = {}
 
-        self.active_orders = {}
+        self.active_orders: dict[str, OrderData] = {}
+        self.active_quotes: dict[str, QuoteData] = {}
 
-        self.add_function()
+        self.offset_converters: dict[str, OffsetConverter] = {}
+
         self.register_event()
 
-    def add_function(self):
-        """Add query function to main engine."""
-        self.main_engine.get_tick = self.get_tick
-        self.main_engine.get_order = self.get_order
-        self.main_engine.get_trade = self.get_trade
-        self.main_engine.get_position = self.get_position
-        self.main_engine.get_account = self.get_account
-        self.main_engine.get_contract = self.get_contract
-        self.main_engine.get_all_ticks = self.get_all_ticks
-        self.main_engine.get_all_orders = self.get_all_orders
-        self.main_engine.get_all_trades = self.get_all_trades
-        self.main_engine.get_all_positions = self.get_all_positions
-        self.main_engine.get_all_accounts = self.get_all_accounts
-        self.main_engine.get_all_contracts = self.get_all_contracts
-        self.main_engine.get_all_active_orders = self.get_all_active_orders
-
-    def register_event(self):
+    def register_event(self) -> None:
         """"""
         self.event_engine.register(EVENT_TICK, self.process_tick_event)
         self.event_engine.register(EVENT_ORDER, self.process_order_event)
@@ -364,15 +389,16 @@ class OmsEngine(BaseEngine):
         self.event_engine.register(EVENT_POSITION, self.process_position_event)
         self.event_engine.register(EVENT_ACCOUNT, self.process_account_event)
         self.event_engine.register(EVENT_CONTRACT, self.process_contract_event)
+        self.event_engine.register(EVENT_QUOTE, self.process_quote_event)
 
-    def process_tick_event(self, event: Event):
+    def process_tick_event(self, event: Event) -> None:
         """"""
-        tick = event.data
+        tick: TickData = event.data
         self.ticks[tick.vt_symbol] = tick
 
-    def process_order_event(self, event: Event):
+    def process_order_event(self, event: Event) -> None:
         """"""
-        order = event.data
+        order: OrderData = event.data
         self.orders[order.vt_orderid] = order
 
         # If order is active, then update data in dict.
@@ -382,131 +408,199 @@ class OmsEngine(BaseEngine):
         elif order.vt_orderid in self.active_orders:
             self.active_orders.pop(order.vt_orderid)
 
-    def process_trade_event(self, event: Event):
+        # Update to offset converter
+        converter: OffsetConverter | None = self.offset_converters.get(order.gateway_name, None)
+        if converter:
+            converter.update_order(order)
+
+    def process_trade_event(self, event: Event) -> None:
         """"""
-        trade = event.data
+        trade: TradeData = event.data
         self.trades[trade.vt_tradeid] = trade
 
-    def process_position_event(self, event: Event):
+        # Update to offset converter
+        converter: OffsetConverter | None = self.offset_converters.get(trade.gateway_name, None)
+        if converter:
+            converter.update_trade(trade)
+
+    def process_position_event(self, event: Event) -> None:
         """"""
-        position = event.data
+        position: PositionData = event.data
         self.positions[position.vt_positionid] = position
 
-    def process_account_event(self, event: Event):
+        # Update to offset converter
+        converter: OffsetConverter | None = self.offset_converters.get(position.gateway_name, None)
+        if converter:
+            converter.update_position(position)
+
+    def process_account_event(self, event: Event) -> None:
         """"""
-        account = event.data
+        account: AccountData = event.data
         self.accounts[account.vt_accountid] = account
 
-    def process_contract_event(self, event: Event):
+    def process_contract_event(self, event: Event) -> None:
         """"""
-        contract = event.data
+        contract: ContractData = event.data
         self.contracts[contract.vt_symbol] = contract
 
-    def get_tick(self, vt_symbol):
+        # Initialize offset converter for each gateway
+        if contract.gateway_name not in self.offset_converters:
+            self.offset_converters[contract.gateway_name] = OffsetConverter(self)
+
+    def process_quote_event(self, event: Event) -> None:
+        """"""
+        quote: QuoteData = event.data
+        self.quotes[quote.vt_quoteid] = quote
+
+        # If quote is active, then update data in dict.
+        if quote.is_active():
+            self.active_quotes[quote.vt_quoteid] = quote
+        # Otherwise, pop inactive quote from in dict
+        elif quote.vt_quoteid in self.active_quotes:
+            self.active_quotes.pop(quote.vt_quoteid)
+
+    def get_tick(self, vt_symbol: str) -> TickData | None:
         """
         Get latest market tick data by vt_symbol.
         """
         return self.ticks.get(vt_symbol, None)
 
-    def get_order(self, vt_orderid):
+    def get_order(self, vt_orderid: str) -> OrderData | None:
         """
         Get latest order data by vt_orderid.
         """
         return self.orders.get(vt_orderid, None)
 
-    def get_trade(self, vt_tradeid):
+    def get_trade(self, vt_tradeid: str) -> TradeData | None:
         """
         Get trade data by vt_tradeid.
         """
         return self.trades.get(vt_tradeid, None)
 
-    def get_position(self, vt_positionid):
+    def get_position(self, vt_positionid: str) -> PositionData | None:
         """
         Get latest position data by vt_positionid.
         """
         return self.positions.get(vt_positionid, None)
 
-    def get_account(self, vt_accountid):
+    def get_account(self, vt_accountid: str) -> AccountData | None:
         """
         Get latest account data by vt_accountid.
         """
         return self.accounts.get(vt_accountid, None)
 
-    def get_contract(self, vt_symbol):
+    def get_contract(self, vt_symbol: str) -> ContractData | None:
         """
         Get contract data by vt_symbol.
         """
         return self.contracts.get(vt_symbol, None)
 
-    def get_all_ticks(self):
+    def get_quote(self, vt_quoteid: str) -> QuoteData | None:
+        """
+        Get latest quote data by vt_orderid.
+        """
+        return self.quotes.get(vt_quoteid, None)
+
+    def get_all_ticks(self) -> list[TickData]:
         """
         Get all tick data.
         """
         return list(self.ticks.values())
 
-    def get_all_orders(self):
+    def get_all_orders(self) -> list[OrderData]:
         """
         Get all order data.
         """
         return list(self.orders.values())
 
-    def get_all_trades(self):
+    def get_all_trades(self) -> list[TradeData]:
         """
         Get all trade data.
         """
         return list(self.trades.values())
 
-    def get_all_positions(self):
+    def get_all_positions(self) -> list[PositionData]:
         """
         Get all position data.
         """
         return list(self.positions.values())
 
-    def get_all_accounts(self):
+    def get_all_accounts(self) -> list[AccountData]:
         """
         Get all account data.
         """
         return list(self.accounts.values())
 
-    def get_all_contracts(self):
+    def get_all_contracts(self) -> list[ContractData]:
         """
         Get all contract data.
         """
         return list(self.contracts.values())
 
-    def get_all_active_orders(self, vt_symbol: str = ""):
+    def get_all_quotes(self) -> list[QuoteData]:
         """
-        Get all active orders by vt_symbol.
+        Get all quote data.
+        """
+        return list(self.quotes.values())
 
-        If vt_symbol is empty, return all active orders.
+    def get_all_active_orders(self) -> list[OrderData]:
         """
-        if not vt_symbol:
-            return list(self.active_orders.values())
-        else:
-            active_orders = [
-                order
-                for order in self.active_orders.values()
-                if order.vt_symbol == vt_symbol
-            ]
-            return active_orders
+        Get all active orders.
+        """
+        return list(self.active_orders.values())
+
+    def get_all_active_quotes(self) -> list[QuoteData]:
+        """
+        Get all active quotes.
+        """
+        return list(self.active_quotes.values())
+
+    def update_order_request(self, req: OrderRequest, vt_orderid: str, gateway_name: str) -> None:
+        """
+        Update order request to offset converter.
+        """
+        converter: OffsetConverter | None = self.offset_converters.get(gateway_name, None)
+        if converter:
+            converter.update_order_request(req, vt_orderid)
+
+    def convert_order_request(
+        self,
+        req: OrderRequest,
+        gateway_name: str,
+        lock: bool,
+        net: bool = False
+    ) -> list[OrderRequest]:
+        """
+        Convert original order request according to given mode.
+        """
+        converter: OffsetConverter | None = self.offset_converters.get(gateway_name, None)
+        if not converter:
+            return [req]
+
+        reqs: list[OrderRequest] = converter.convert_order_request(req, lock, net)
+        return reqs
+
+    def get_converter(self, gateway_name: str) -> OffsetConverter | None:
+        """
+        Get offset converter object of specific gateway.
+        """
+        return self.offset_converters.get(gateway_name, None)
 
 
 class EmailEngine(BaseEngine):
     """
-    Provides email sending function for VN Trader.
+    Provides email sending function.
     """
 
-    def __init__(self, main_engine: MainEngine, event_engine: EventEngine):
+    def __init__(self, main_engine: MainEngine, event_engine: EventEngine) -> None:
         """"""
-        super(EmailEngine, self).__init__(main_engine, event_engine, "email")
+        super().__init__(main_engine, event_engine, "email")
 
-        self.thread = Thread(target=self.run)
-        self.queue = Queue()
-        self.active = False
+        self.thread: Thread = Thread(target=self.run)
+        self.queue: Queue[EmailMessage] = Queue()
+        self.active: bool = False
 
-        self.main_engine.send_email = self.send_email
-
-    def send_email(self, subject: str, content: str, receiver: str = ""):
+    def send_email(self, subject: str, content: str, receiver: str | None = None) -> None:
         """"""
         # Start email engine when sending first email.
         if not self.active:
@@ -516,39 +610,229 @@ class EmailEngine(BaseEngine):
         if not receiver:
             receiver = SETTINGS["email.receiver"]
 
-        msg = EmailMessage()
+        msg: EmailMessage = EmailMessage()
         msg["From"] = SETTINGS["email.sender"]
-        msg["To"] = SETTINGS["email.receiver"]
+        msg["To"] = receiver
         msg["Subject"] = subject
         msg.set_content(content)
 
         self.queue.put(msg)
 
-    def run(self):
+    def run(self) -> None:
         """"""
+        server: str = SETTINGS["email.server"]
+        port: int = SETTINGS["email.port"]
+        username: str = SETTINGS["email.username"]
+        password: str = SETTINGS["email.password"]
+
         while self.active:
             try:
-                msg = self.queue.get(block=True, timeout=1)
+                msg: EmailMessage = self.queue.get(block=True, timeout=1)
 
-                with smtplib.SMTP_SSL(
-                    SETTINGS["email.server"], SETTINGS["email.port"]
-                ) as smtp:
-                    smtp.login(
-                        SETTINGS["email.username"], SETTINGS["email.password"]
-                    )
-                    smtp.send_message(msg)
+                try:
+                    with smtplib.SMTP_SSL(server, port) as smtp:
+                        smtp.login(username, password)
+                        smtp.send_message(msg)
+                        smtp.close()
+                except Exception:
+                    log_msg: str = _("邮件发送失败: {}").format(traceback.format_exc())
+                    self.main_engine.write_log(log_msg, "EmailEngine")
             except Empty:
                 pass
 
-    def start(self):
+    def start(self) -> None:
         """"""
         self.active = True
         self.thread.start()
 
-    def close(self):
+    def close(self) -> None:
         """"""
         if not self.active:
             return
 
         self.active = False
         self.thread.join()
+
+
+class WechatEngine(BaseEngine):
+    """
+    Provides WeChat push notification function.
+    """
+
+    setting_filename: str = "wechat_setting.json"
+
+    def __init__(self, main_engine: MainEngine, event_engine: EventEngine) -> None:
+        """"""
+        super().__init__(main_engine, event_engine, "wechat")
+
+        self.creds: Credentials | None = None
+        self.user_id: str = ""
+
+        self.send_interval: int = 60
+        self.last_ts: float | None = None
+
+        self.pending_msgs: list[str] = []
+
+        self.queue: Queue[str] = Queue()
+        self.thread: Thread | None = None
+        self.active: bool = False
+
+        self.load_setting()
+
+        if self.creds and self.user_id:
+            self.activate()
+
+    def load_setting(self) -> None:
+        """Load credentials and user info from json file."""
+        data: dict[str, Any] = load_json(self.setting_filename)
+
+        bot_id: str = data.get("bot_id") or ""
+        token: str = data.get("token") or ""
+        if bot_id and token:
+            base_url: str = data.get("base_url") or "https://ilinkai.weixin.qq.com"
+            self.creds = Credentials(
+                bot_id=bot_id,
+                token=token,
+                base_url=base_url,
+            )
+        else:
+            self.creds = None
+
+        self.user_id = str(data.get("user_id") or data.get("chat_id") or "")
+
+        send_interval: Any = data.get("send_interval")
+        if isinstance(send_interval, int) and send_interval >= 0:
+            self.send_interval = send_interval
+
+    def save_setting(self) -> None:
+        """Persist current state back to json file."""
+        data: dict[str, Any] = {}
+
+        if self.creds:
+            data["bot_id"] = self.creds.bot_id
+            data["token"] = self.creds.token
+            data["base_url"] = self.creds.base_url
+
+        if self.user_id:
+            data["user_id"] = self.user_id
+
+        data["send_interval"] = self.send_interval
+
+        save_json(self.setting_filename, data)
+
+    def bind(self, creds: Credentials, user_id: str) -> None:
+        """
+        Complete binding with QR-code credentials and user ID.
+        """
+        self.deactivate()
+
+        self.creds = creds
+        self.user_id = user_id
+
+        self.save_setting()
+        self.activate()
+
+    def unbind(self) -> None:
+        """Clear credentials and stop pushing."""
+        self.deactivate()
+
+        self.creds = None
+        self.user_id = ""
+        self.pending_msgs.clear()
+
+        self.save_setting()
+
+    def activate(self) -> None:
+        """Start worker thread."""
+        self.start()
+
+    def deactivate(self) -> None:
+        """Stop worker thread."""
+        self.stop()
+
+    def start(self) -> None:
+        """Start WeChat sending worker."""
+        if self.active:
+            return
+
+        self.active = True
+        self.thread = Thread(target=self.run)
+        self.thread.start()
+
+    def stop(self) -> None:
+        """Stop WeChat sending worker."""
+        if not self.active:
+            return
+
+        self.active = False
+
+        if (
+            self.thread
+            and self.thread.is_alive()
+            and self.thread is not current_thread()
+        ):
+            self.thread.join()
+
+    def send_wechat(self, msg: str) -> None:
+        """Queue a text message for WeChat push."""
+        if not self.creds or not self.user_id:
+            return
+
+        self.queue.put(msg)
+
+    def run(self) -> None:
+        """Send queued WeChat messages in worker thread."""
+        while self.active:
+            try:
+                msg: str = self.queue.get(block=True, timeout=1)
+                self.pending_msgs.append(msg)
+            except Empty:
+                pass
+
+            while True:
+                try:
+                    self.pending_msgs.append(self.queue.get_nowait())
+                except Empty:
+                    break
+
+            if not self.pending_msgs:
+                continue
+
+            if not self.creds or not self.user_id:
+                continue
+
+            gap: float = self.send_interval
+            if gap > 0:
+                prior: float | None = self.last_ts
+                if prior is not None:
+                    wait_secs: float = prior + gap - time.monotonic()
+                    if wait_secs > 0:
+                        continue
+
+            msgs: list[str] = list(self.pending_msgs)
+            self.pending_msgs.clear()
+
+            try:
+                self.last_ts = time.monotonic()
+                send_text(
+                    self.creds,
+                    self.user_id,
+                    "\n".join(msgs),
+                )
+            except SessionExpired:
+                self.pending_msgs = msgs + self.pending_msgs
+                self.active = False
+                self.main_engine.write_log(
+                    _("微信会话已过期，请通过菜单重新扫码绑定"),
+                    self.engine_name,
+                )
+            except WeixinError as exc:
+                self.pending_msgs = msgs + self.pending_msgs
+                self.main_engine.write_log(
+                    _("微信推送失败：{}").format(exc),
+                    self.engine_name,
+                )
+
+    def close(self) -> None:
+        """"""
+        self.deactivate()
