@@ -19,6 +19,8 @@ x64
 build
 dist
 *.local
+.venv
+research/
 
 # VeighNa
 .vntrader

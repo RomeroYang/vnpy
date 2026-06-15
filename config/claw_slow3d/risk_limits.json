@@ -1,0 +1,13 @@
+{
+  "dry_run": true,
+  "allow_order_routing": false,
+  "max_gross_target_weight": 1.0,
+  "max_estimated_margin_ratio": 0.35,
+  "max_single_symbol_weight": 0.15,
+  "max_active_symbols": 12,
+  "max_contract_delta_per_symbol": 5,
+  "blocked_symbols": [],
+  "require_all_contracts_mapped": true,
+  "require_recent_daily_bar": true,
+  "max_data_lag_days": 3
+}

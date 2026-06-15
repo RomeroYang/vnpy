@@ -1,0 +1,7 @@
+research_symbol,exchange,vt_symbol,product,roll_rule,roll_date,active
+CF0,CZCE,CF609.CZCE,cotton,manual,,true
+HC0,SHFE,hc2610.SHFE,hot_rolled_coil,manual,,true
+M0,DCE,m2609.DCE,soybean_meal,manual,,true
+NR0,INE,nr2608.INE,no20_rubber,manual,,true
+RB0,SHFE,rb2610.SHFE,rebar,manual,,true
+RU0,SHFE,ru2609.SHFE,natural_rubber,manual,,true
